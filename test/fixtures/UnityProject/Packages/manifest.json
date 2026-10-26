@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "com.example.local": "file:../LocalPackages/com.example.local",
+    "com.example.cached": "1.2.3"
+  }
+}

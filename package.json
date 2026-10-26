@@ -1,8 +1,8 @@
 {
   "name": "urp-shaderlab-tools",
   "displayName": "URP ShaderLab Tools",
-  "description": "IntelliSense, navigation and language features for Unity URP ShaderLab and HLSL.",
-  "version": "0.1.0",
+  "description": "Unity URP ShaderLab / HLSL 向けの補完・定義ジャンプ・参照検索・診断・Include Tree",
+  "version": "0.2.0",
   "publisher": "urp-shaderlab-tools",
   "repository": "https://github.com/nekorozy111/Shaderlab-VSCodeExtension",
   "license": "MIT",
@@ -10,14 +10,15 @@
     "vscode": "^1.90.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters"
   ],
   "activationEvents": [
     "onLanguage:shaderlab",
-    "onLanguage:UnityShader",
     "onLanguage:hlsl",
     "onLanguage:hlsli",
-    "onLanguage:compute"
+    "onLanguage:compute",
+    "onView:urpShaderLab.includeTree"
   ],
   "main": "./out/src/extension.js",
   "contributes": {
@@ -41,7 +42,8 @@
         ],
         "extensions": [
           ".hlsl",
-          ".cginc"
+          ".cginc",
+          ".glslinc"
         ],
         "configuration": "./language-configuration/hlsl.json"
       },
@@ -68,20 +70,48 @@
     ],
     "commands": [
       {
-        "command": "urpShaderLab.showMemoryStats",
-        "title": "URP ShaderLab Tools: Show Memory Stats"
-      },
-      {
         "command": "urpShaderLab.selectAnalysisRoot",
-        "title": "rootを選択"
+        "title": "解析rootとして固定",
+        "category": "URP ShaderLab",
+        "icon": "$(pin)"
       },
       {
         "command": "urpShaderLab.clearAnalysisRoot",
-        "title": "rootを解除"
+        "title": "解析rootの固定を解除",
+        "category": "URP ShaderLab",
+        "icon": "$(pinned)"
       },
       {
         "command": "urpShaderLab.refreshIncludeTree",
-        "title": "ShaderLab: Include Treeを更新"
+        "title": "シェーダーを再解析",
+        "category": "URP ShaderLab",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "urpShaderLab.revealIncludeLine",
+        "title": "include文の位置を表示",
+        "category": "URP ShaderLab",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "urpShaderLab.showMemoryStats",
+        "title": "解析状況(メモリ)を表示",
+        "category": "URP ShaderLab"
+      },
+      {
+        "command": "urpShaderLab.selectColorPreset",
+        "title": "色のプリセットを選択",
+        "category": "URP ShaderLab"
+      },
+      {
+        "command": "urpShaderLab.openColorSettings",
+        "title": "色の設定を開く",
+        "category": "URP ShaderLab"
+      },
+      {
+        "command": "urpShaderLab.removeColorSettings",
+        "title": "色の設定をすべて削除(テーマ標準に戻す)",
+        "category": "URP ShaderLab"
       }
     ],
     "configuration": {
@@ -90,7 +120,27 @@
         "urpShaderLab.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Enable URP ShaderLab Tools."
+          "description": "拡張機能を有効にします(変更後はウィンドウの再読み込みが必要です)。"
+        },
+        "urpShaderLab.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "エラー・警告を表示します。"
+        },
+        "urpShaderLab.diagnostics.undefinedIdentifiers": {
+          "type": "boolean",
+          "default": true,
+          "description": "未定義の識別子・関数・型を警告します。includeをすべて解決できた場合にのみ検査します。"
+        },
+        "urpShaderLab.diagnostics.srpBatcher": {
+          "type": "boolean",
+          "default": true,
+          "description": "SRP Batcherとの互換性(UnityPerMaterial CBUFFER)を検査します。"
+        },
+        "urpShaderLab.inlayHints.parameterQualifiers": {
+          "type": "boolean",
+          "default": true,
+          "description": "out / inout 引数に渡している箇所にインレイヒントを表示します。"
         },
         "urpShaderLab.trace.server": {
           "type": "string",
@@ -100,150 +150,240 @@
             "verbose"
           ],
           "default": "off",
-          "description": "Trace Language Server communication."
+          "description": "Language Serverとの通信をOutputに記録します。"
+        },
+        "urpShaderLab.colors.preset": {
+          "type": "string",
+          "enum": [
+            "csharp",
+            "theme"
+          ],
+          "default": "csharp",
+          "order": 0,
+          "enumItemLabels": [
+            "C#風",
+            "テーマ標準"
+          ],
+          "enumDescriptions": [
+            "C#の配色に近い色(これまでの既定)",
+            "色を指定せず、拡張機能がない場合と同じテーマの色を使う"
+          ],
+          "markdownDescription": "シェーダーの色のプリセット。下の個別の色を指定した項目はプリセットより優先されます。\n\n色はユーザー設定の `editor.semanticTokenColorCustomizations` / `editor.tokenColorCustomizations` に、シェーダーの言語だけを対象としたルールとして書き込まれます。"
+        },
+        "urpShaderLab.colors.keyword": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 1,
+          "markdownDescription": "**キーワード** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: `if` `return` `struct` `static` や ShaderLab の `SubShader` `Pass` など"
+        },
+        "urpShaderLab.colors.builtinType": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 2,
+          "markdownDescription": "**組み込み型** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: `float4` `half3` `Texture2D` `SamplerState` など"
+        },
+        "urpShaderLab.colors.type": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 3,
+          "markdownDescription": "**ユーザー定義の型** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: 構造体・typedef・cbuffer の名前"
+        },
+        "urpShaderLab.colors.function": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 4,
+          "markdownDescription": "**関数** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: ユーザー定義・include先の関数とメソッド"
+        },
+        "urpShaderLab.colors.builtinFunction": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 5,
+          "markdownDescription": "**組み込み関数** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: `lerp` `saturate` `mul` やテクスチャの `Sample` など"
+        },
+        "urpShaderLab.colors.macro": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 6,
+          "markdownDescription": "**マクロ** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: `#define` で定義された名前、`TEXTURE2D` などのUnityマクロ"
+        },
+        "urpShaderLab.colors.localVariable": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 7,
+          "markdownDescription": "**ローカル変数** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: 関数内で宣言した変数"
+        },
+        "urpShaderLab.colors.globalVariable": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 8,
+          "markdownDescription": "**グローバル変数** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: グローバル変数・CBUFFER 内の変数"
+        },
+        "urpShaderLab.colors.parameter": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 9,
+          "markdownDescription": "**引数** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: 関数の引数"
+        },
+        "urpShaderLab.colors.field": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 10,
+          "markdownDescription": "**メンバー** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: 構造体のメンバー・スウィズル・ShaderLab の Property 名"
+        },
+        "urpShaderLab.colors.semantic": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 11,
+          "markdownDescription": "**セマンティクス** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: `SV_Target` `POSITION` `TEXCOORD0` など"
+        },
+        "urpShaderLab.colors.preprocessor": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 12,
+          "markdownDescription": "**プリプロセッサ** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: `#include` `#pragma` `#if` など"
+        },
+        "urpShaderLab.colors.renderState": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 13,
+          "markdownDescription": "**描画ステート** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: ShaderLab の `Cull` `ZWrite` `Blend` とその値"
+        },
+        "urpShaderLab.colors.comment": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 14,
+          "markdownDescription": "**コメント** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。"
+        },
+        "urpShaderLab.colors.string": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 15,
+          "markdownDescription": "**文字列** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。\n\n対象: 文字列・include パス"
+        },
+        "urpShaderLab.colors.number": {
+          "type": "string",
+          "default": "",
+          "format": "color-hex",
+          "order": 16,
+          "markdownDescription": "**数値** の色(例: `#4EC9B0`)。空欄ならプリセットの色を使います。"
         }
       }
     },
     "configurationDefaults": {
       "[shaderlab]": {
-        "editor.semanticHighlighting.enabled": true,
-        "editor.semanticTokenColorCustomizations": {
-          "rules": {
-            "namespace": "#4FC1FF",
-            "type": "#4EC9B0",
-            "struct": "#4EC9B0",
-            "class": "#4EC9B0",
-            "interface": "#4EC9B0",
-            "enum": "#4EC9B0",
-            "enumMember": "#4FC1FF",
-            "typeParameter": "#4EC9B0",
-            "function": "#DCDCAA",
-            "method": "#DCDCAA",
-            "property": "#4FC1FF",
-            "field": "#4FC1FF",
-            "variable": "#9CDCFE",
-            "parameter": "#9CDCFE",
-            "constant": "#4FC1FF",
-            "macro": "#569CD6",
-            "keyword": "#C586C0",
-            "operator": "#D4D4D4",
-            "number": "#B5CEA8",
-            "string": "#CE9178",
-            "comment": "#6A9955"
-          }
-        }
+        "editor.semanticHighlighting.enabled": true
       },
       "[hlsl]": {
-        "editor.semanticHighlighting.enabled": true,
-        "editor.semanticTokenColorCustomizations": {
-          "rules": {
-            "namespace": "#4FC1FF",
-            "type": "#4EC9B0",
-            "struct": "#4EC9B0",
-            "class": "#4EC9B0",
-            "interface": "#4EC9B0",
-            "enum": "#4EC9B0",
-            "enumMember": "#4FC1FF",
-            "typeParameter": "#4EC9B0",
-            "function": "#DCDCAA",
-            "method": "#DCDCAA",
-            "property": "#4FC1FF",
-            "field": "#4FC1FF",
-            "variable": "#9CDCFE",
-            "parameter": "#9CDCFE",
-            "constant": "#4FC1FF",
-            "macro": "#569CD6",
-            "keyword": "#C586C0",
-            "operator": "#D4D4D4",
-            "number": "#B5CEA8",
-            "string": "#CE9178",
-            "comment": "#6A9955"
-          }
-        }
+        "editor.semanticHighlighting.enabled": true
       },
       "[hlsli]": {
-        "editor.semanticHighlighting.enabled": true,
-        "editor.semanticTokenColorCustomizations": {
-          "rules": {
-            "namespace": "#4FC1FF",
-            "type": "#4EC9B0",
-            "struct": "#4EC9B0",
-            "class": "#4EC9B0",
-            "interface": "#4EC9B0",
-            "enum": "#4EC9B0",
-            "enumMember": "#4FC1FF",
-            "typeParameter": "#4EC9B0",
-            "function": "#DCDCAA",
-            "method": "#DCDCAA",
-            "property": "#4FC1FF",
-            "field": "#4FC1FF",
-            "variable": "#9CDCFE",
-            "parameter": "#9CDCFE",
-            "constant": "#4FC1FF",
-            "macro": "#569CD6",
-            "keyword": "#C586C0",
-            "operator": "#D4D4D4",
-            "number": "#B5CEA8",
-            "string": "#CE9178",
-            "comment": "#6A9955"
-          }
-        }
+        "editor.semanticHighlighting.enabled": true
       },
       "[compute]": {
-        "editor.semanticHighlighting.enabled": true,
-        "editor.semanticTokenColorCustomizations": {
-          "rules": {
-            "namespace": "#4FC1FF",
-            "type": "#4EC9B0",
-            "struct": "#4EC9B0",
-            "class": "#4EC9B0",
-            "interface": "#4EC9B0",
-            "enum": "#4EC9B0",
-            "enumMember": "#4FC1FF",
-            "typeParameter": "#4EC9B0",
-            "function": "#DCDCAA",
-            "method": "#DCDCAA",
-            "property": "#4FC1FF",
-            "field": "#4FC1FF",
-            "variable": "#9CDCFE",
-            "parameter": "#9CDCFE",
-            "constant": "#4FC1FF",
-            "macro": "#569CD6",
-            "keyword": "#C586C0",
-            "operator": "#D4D4D4",
-            "number": "#B5CEA8",
-            "string": "#CE9178",
-            "comment": "#6A9955"
-          }
-        }
+        "editor.semanticHighlighting.enabled": true
       }
     },
     "views": {
       "explorer": [
         {
           "id": "urpShaderLab.includeTree",
-          "name": "ShaderLab Include Roots"
+          "name": "ShaderLab Include Tree",
+          "icon": "$(type-hierarchy)"
         }
       ]
     },
     "menus": {
-      "view/item/context": [
-        {
-          "command": "urpShaderLab.selectAnalysisRoot",
-          "when": "view == urpShaderLab.includeTree",
-          "group": "inline@1"
-        },
+      "view/title": [
         {
           "command": "urpShaderLab.refreshIncludeTree",
           "when": "view == urpShaderLab.includeTree",
-          "group": "navigation"
+          "group": "navigation@2"
+        },
+        {
+          "command": "urpShaderLab.clearAnalysisRoot",
+          "when": "view == urpShaderLab.includeTree && urpShaderLab.hasPinnedRoot",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "urpShaderLab.selectAnalysisRoot",
+          "when": "view == urpShaderLab.includeTree && viewItem =~ /^urpShaderLab.(root|include)$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "urpShaderLab.clearAnalysisRoot",
+          "when": "view == urpShaderLab.includeTree && viewItem == urpShaderLab.root.pinned",
+          "group": "inline@1"
+        },
+        {
+          "command": "urpShaderLab.revealIncludeLine",
+          "when": "view == urpShaderLab.includeTree && viewItem =~ /^urpShaderLab.include/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "urpShaderLab.selectAnalysisRoot",
+          "when": "view == urpShaderLab.includeTree && viewItem =~ /^urpShaderLab.(root|include)$/",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "urpShaderLab.revealIncludeLine",
+          "when": "false"
+        },
+        {
+          "command": "urpShaderLab.clearAnalysisRoot",
+          "when": "urpShaderLab.hasPinnedRoot"
         }
       ]
-    }
+    },
+    "grammars": [
+      {
+        "language": "shaderlab",
+        "scopeName": "source.shaderlab",
+        "path": "./syntaxes/shaderlab.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.hlsl": "hlsl"
+        }
+      },
+      {
+        "language": "hlsl",
+        "scopeName": "source.hlsl",
+        "path": "./syntaxes/hlsl.tmLanguage.json"
+      },
+      {
+        "language": "hlsli",
+        "scopeName": "source.hlsl",
+        "path": "./syntaxes/hlsl.tmLanguage.json"
+      },
+      {
+        "language": "compute",
+        "scopeName": "source.hlsl",
+        "path": "./syntaxes/hlsl.tmLanguage.json"
+      }
+    ]
   },
   "scripts": {
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node ./out/test/runTests.js",
     "package": "vsce package"
   },
   "dependencies": {
@@ -256,5 +396,12 @@
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.0.0",
     "typescript": "^5.0.0"
-  }
+  },
+  "keywords": [
+    "unity",
+    "shaderlab",
+    "hlsl",
+    "urp",
+    "shader"
+  ]
 }

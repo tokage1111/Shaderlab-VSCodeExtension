@@ -1,143 +1,212 @@
-import { SourceRange } from './token';
+/**
+ * 解析結果の構造。位置はすべてファイル先頭からのoffset。
+ * ShaderLab内のHLSLブロックも同じoffset基準で保持するため、座標変換は不要。
+ */
 
-export interface AstNode {
-  kind: string;
-  range: SourceRange;
+export interface Spanned {
+  start: number;
+  end: number;
 }
 
-/* =========================================================
- * HLSL
- * =======================================================*/
-export interface HlslParameterNode extends AstNode {
-  kind: 'HlslParameter';
-  typeName: string;
+export interface NameSpan {
   name: string;
-  /** 引数の修飾子。呼び出し側のInlayHint表示に利用する。 */
-  qualifier?: 'in' | 'out' | 'inout' | 'uniform';
+  nameStart: number;
+  nameEnd: number;
+}
+
+export type ParameterQualifier = 'in' | 'out' | 'inout' | 'uniform';
+
+export interface HlslVariable extends Spanned, NameSpan {
+  /** 修飾子を除いた型名(テンプレート引数を含む)。例: `Texture2D<float4>`。 */
+  type: string;
+  typeStart: number;
+  typeEnd: number;
+  /** 配列の次元数。 */
+  arrayDims: number;
   semantic?: string;
-  semanticRange?: SourceRange;
+  semanticStart?: number;
+  qualifiers: string[];
+  /** マクロ(TEXTURE2D(...)等)から推定した宣言。 */
+  fromMacro?: string;
+  /** 初期化式の範囲(`= ...` の右辺)。 */
+  initStart?: number;
+  initEnd?: number;
 }
 
-export interface HlslVariableNode extends AstNode {
-  kind: 'HlslVariable';
-  typeName: string;
-  name: string;
-  semantic?: string;
-  semanticRange?: SourceRange;
-  /** ローカル変数の場合、その変数が有効なブロックスコープ。 */
-  scope?: SourceRange;
+export interface HlslParameter extends HlslVariable {
+  qualifier?: ParameterQualifier;
+  hasDefault: boolean;
 }
 
-export interface HlslStructNode extends AstNode {
-  kind: 'HlslStruct';
-  name: string;
-  fields: HlslVariableNode[];
+export interface HlslLocal extends HlslVariable {
+  /** 宣言が有効な範囲。 */
+  scopeStart: number;
+  scopeEnd: number;
 }
 
-export interface HlslFunctionNode extends AstNode {
-  kind: 'HlslFunction';
+export interface HlslFunction extends Spanned, NameSpan {
+  kind: 'function';
   returnType: string;
-  name: string;
-  parameters: HlslParameterNode[];
-  /** 関数本体から抽出したローカル変数。WorkspaceIndexには登録せずF12等から直接利用する。 */
-  locals: HlslVariableNode[];
+  returnTypeStart: number;
+  params: HlslParameter[];
+  /** 解析できない引数宣言(未知のマクロ等)を含む。 */
+  paramsIncomplete: boolean;
+  semantic?: string;
+  bodyStart?: number;
+  bodyEnd?: number;
+  locals: HlslLocal[];
 }
 
-export interface HlslTypedefNode extends AstNode {
-  kind: 'HlslTypedef';
-  name: string;
-  typeName: string;
+export interface HlslStruct extends Spanned, NameSpan {
+  kind: 'struct';
+  fields: HlslVariable[];
+  /** 展開できないマクロがメンバーとして含まれる(存在しないメンバーの判定を控える)。 */
+  hasUnknownMembers: boolean;
+  /** メンバー関数。 */
+  methods: HlslFunction[];
 }
 
-export interface HlslIncludeNode extends AstNode {
-  kind: 'HlslInclude';
+export interface HlslCBuffer extends Spanned, NameSpan {
+  kind: 'cbuffer';
+  fields: HlslVariable[];
+  style: 'cbuffer' | 'tbuffer' | 'macro';
+}
+
+export interface HlslTypedef extends Spanned, NameSpan {
+  kind: 'typedef';
+  type: string;
+}
+
+export interface HlslMacro extends Spanned, NameSpan {
+  kind: 'macro';
+  /** 関数形式マクロのパラメータ。オブジェクト形式ならundefined。 */
+  params?: string[];
+  body: string;
+}
+
+export interface HlslInclude extends Spanned {
   path: string;
+  pathStart: number;
+  pathEnd: number;
+  withPragmas: boolean;
+  /** #if 等の条件付きコンパイルの内側にある。 */
+  conditional: boolean;
+  angle: boolean;
 }
 
-export interface HlslMacroNode extends AstNode {
-  kind: 'HlslMacro';
-  name: string;
+export interface HlslPragmaArg {
   value: string;
+  start: number;
+  end: number;
 }
 
-export interface HlslCBufferNode extends AstNode {
-  kind: 'HlslCBuffer';
+export interface HlslPragma extends Spanned {
+  /** `vertex`, `fragment`, `multi_compile` など。 */
   name: string;
-  fields: HlslVariableNode[];
+  nameStart: number;
+  nameEnd: number;
+  args: HlslPragmaArg[];
 }
 
-export type HlslDeclarationNode =
-  | HlslStructNode
-  | HlslFunctionNode
-  | HlslVariableNode
-  | HlslTypedefNode
-  | HlslIncludeNode
-  | HlslMacroNode
-  | HlslCBufferNode;
-export interface HlslDocumentNode extends AstNode {
-  kind: 'HlslDocument';
-  declarations: HlslDeclarationNode[];
+export interface ParseIssue extends Spanned {
+  message: string;
+  severity: 'error' | 'warning';
 }
 
-/* =========================================================
+/** HLSLの翻訳単位の断片(HLSLファイル全体、またはShaderLab内の1ブロック)。 */
+export interface HlslUnit extends Spanned {
+  /** ファイルのトークン配列上の範囲 [tokenStart, tokenEnd)。 */
+  tokenStart: number;
+  tokenEnd: number;
+  functions: HlslFunction[];
+  structs: HlslStruct[];
+  cbuffers: HlslCBuffer[];
+  globals: HlslVariable[];
+  typedefs: HlslTypedef[];
+  macros: HlslMacro[];
+  includes: HlslInclude[];
+  pragmas: HlslPragma[];
+  /** 宣言名・型名・セマンティクスなど、識別子参照として扱わないトークンの開始offset。 */
+  declarationOffsets: Set<number>;
+  /** セマンティクス/register等のトークン開始offset。 */
+  semanticOffsets: Set<number>;
+  issues: ParseIssue[];
+}
+
+/* ---------------------------------------------------------------------------
  * ShaderLab
- * =======================================================*/
-export interface ShaderPropertyNode extends AstNode {
-  kind: 'ShaderProperty';
-  name: string;
-  displayName?: string;
-  propertyType?: string;
-  defaultValue?: string;
+ * ------------------------------------------------------------------------- */
+
+export interface ShaderProperty extends Spanned, NameSpan {
+  displayName: string;
+  /** Range(0,1) / Color / 2D など、書かれたままの型。 */
+  type: string;
+  /** Range / Float / Int / Color / Vector / 2D / 3D / Cube / 2DArray / CubeArray など正規化した型。 */
+  typeKind: string;
+  typeStart: number;
+  typeEnd: number;
+  defaultValue: string;
   attributes: string[];
 }
 
-export interface ShaderTagEntryNode extends AstNode {
-  kind: 'ShaderTagEntry';
+export interface ShaderTag {
   key: string;
   value: string;
+  keyStart: number;
+  keyEnd: number;
+  valueStart: number;
+  valueEnd: number;
 }
 
-export interface ShaderTagsNode extends AstNode {
-  kind: 'ShaderTags';
-  entries: ShaderTagEntryNode[];
+export type ShaderBlockKind = 'HLSLPROGRAM' | 'HLSLINCLUDE' | 'CGPROGRAM' | 'CGINCLUDE' | 'GLSLPROGRAM';
+
+export interface ShaderHlslBlock extends Spanned {
+  kind: ShaderBlockKind;
+  /** コード部分(開始マーカーの直後から終了マーカーの直前まで)。 */
+  codeStart: number;
+  codeEnd: number;
+  terminated: boolean;
+  unit: HlslUnit;
+  /** 所属するSubShader/Passのindex。Shader直下ならundefined。 */
+  subShaderIndex?: number;
+  passIndex?: number;
 }
 
-export interface ShaderHlslBlockNode extends AstNode {
-  kind: 'ShaderHlslBlock';
-  blockType: 'HLSLPROGRAM' | 'HLSLINCLUDE' | 'CGPROGRAM';
-  source: string;
-  hlsl: HlslDocumentNode;
+export type ShaderSectionKind =
+  | 'Shader'
+  | 'Properties'
+  | 'SubShader'
+  | 'Pass'
+  | 'Tags'
+  | 'Stencil'
+  | 'Category'
+  | 'PackageRequirements'
+  | 'Other';
+
+export interface ShaderSection extends Spanned {
+  kind: ShaderSectionKind;
 }
 
-export interface ShaderPassNode extends AstNode {
-  kind: 'ShaderPass';
+export interface ShaderPass extends Spanned {
   name?: string;
-  tags?: ShaderTagsNode;
-  hlslBlocks: ShaderHlslBlockNode[];
+  nameStart?: number;
+  nameEnd?: number;
+  tags: ShaderTag[];
 }
 
-export interface ShaderSubShaderNode extends AstNode {
-  kind: 'ShaderSubShader';
-  tags?: ShaderTagsNode;
-  passes: ShaderPassNode[];
-  hlslBlocks: ShaderHlslBlockNode[];
+export interface ShaderSubShader extends Spanned {
+  tags: ShaderTag[];
+  passes: ShaderPass[];
 }
 
-export interface ShaderDocumentNode extends AstNode {
-  kind: 'ShaderDocument';
-  shaderName?: string;
-  properties: ShaderPropertyNode[];
-  subShaders: ShaderSubShaderNode[];
-  hlslBlocks: ShaderHlslBlockNode[];
-}
-
-/* =========================================================
- * 解析済みドキュメントのラッパー
- * =======================================================*/
-export type ParsedAst = ShaderDocumentNode | HlslDocumentNode;
-export interface ParsedDocument {
-  uri: string;
-  languageId: string;
-  version: number;
-  ast: ParsedAst;
+export interface ShaderDocument {
+  name?: string;
+  nameStart?: number;
+  nameEnd?: number;
+  properties: ShaderProperty[];
+  propertiesSpan?: Spanned;
+  subShaders: ShaderSubShader[];
+  blocks: ShaderHlslBlock[];
+  sections: ShaderSection[];
+  issues: ParseIssue[];
 }

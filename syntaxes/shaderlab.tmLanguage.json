@@ -1,0 +1,103 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ShaderLab",
+  "scopeName": "source.shaderlab",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#program-blocks" },
+    { "include": "#property-declaration" },
+    { "include": "#strings" },
+    { "include": "#structure" },
+    { "include": "#render-states" },
+    { "include": "#state-values" },
+    { "include": "#property-types" },
+    { "include": "#property-reference" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.block.shaderlab", "begin": "/\\*", "end": "\\*/" },
+        { "name": "comment.line.double-slash.shaderlab", "begin": "//", "end": "$" }
+      ]
+    },
+    "program-blocks": {
+      "patterns": [
+        {
+          "begin": "\\b(HLSLPROGRAM|HLSLINCLUDE|CGPROGRAM|CGINCLUDE)\\b",
+          "end": "\\b(ENDHLSL|ENDCG)\\b",
+          "beginCaptures": { "1": { "name": "keyword.control.program.shaderlab" } },
+          "endCaptures": { "1": { "name": "keyword.control.program.shaderlab" } },
+          "contentName": "meta.embedded.block.hlsl",
+          "patterns": [{ "include": "source.hlsl" }]
+        },
+        {
+          "begin": "\\b(GLSLPROGRAM)\\b",
+          "end": "\\b(ENDGLSL)\\b",
+          "beginCaptures": { "1": { "name": "keyword.control.program.shaderlab" } },
+          "endCaptures": { "1": { "name": "keyword.control.program.shaderlab" } },
+          "contentName": "meta.embedded.block.glsl"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.shaderlab",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [{ "name": "constant.character.escape.shaderlab", "match": "\\\\." }]
+    },
+    "numbers": {
+      "name": "constant.numeric.shaderlab",
+      "match": "(?<![\\w.])-?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?\\b"
+    },
+    "structure": {
+      "patterns": [
+        {
+          "name": "storage.type.structure.shaderlab",
+          "match": "\\b(Shader|Properties|SubShader|Pass|Category|Tags|Stencil|PackageRequirements)\\b"
+        },
+        {
+          "name": "keyword.other.shaderlab",
+          "match": "\\b(LOD|Name|Fallback|FallBack|CustomEditor|CustomEditorForRenderPipeline|UsePass|GrabPass|Dependency)\\b"
+        }
+      ]
+    },
+    "render-states": {
+      "name": "support.type.property-name.render-state.shaderlab",
+      "match": "\\b(Cull|ZWrite|ZTest|ZClip|Blend|BlendOp|ColorMask|AlphaToMask|Offset|Conservative|Lighting|SeparateSpecular|Fog|ColorMaterial|AlphaTest|Ref|ReadMask|WriteMask|Comp|Fail|ZFail|CompFront|CompBack|PassFront|PassBack|FailFront|FailBack|ZFailFront|ZFailBack)\\b"
+    },
+    "state-values": {
+      "name": "constant.language.shaderlab",
+      "match": "\\b(On|Off|Back|Front|Less|Greater|LEqual|GEqual|Equal|NotEqual|Always|Never|Disabled|One|Zero|SrcColor|SrcAlpha|DstColor|DstAlpha|OneMinusSrcColor|OneMinusSrcAlpha|OneMinusDstColor|OneMinusDstAlpha|SrcAlphaSaturate|Add|Sub|RevSub|Min|Max|Keep|Replace|IncrSat|DecrSat|Invert|IncrWrap|DecrWrap|True|False|RGBA|RGB)\\b"
+    },
+    "property-types": {
+      "name": "storage.type.property.shaderlab",
+      "match": "(?i)\\b(Range|Float|Int|Integer|Color|Vector|2D|3D|Cube|2DArray|CubeArray|Any|Rect)\\b"
+    },
+    "property-declaration": {
+      "begin": "^\\s*((?:\\[[^\\]\\n]*\\]\\s*)*)([A-Za-z_]\\w*)\\s*(?=\\()",
+      "beginCaptures": {
+        "1": { "patterns": [{ "include": "#property-attribute" }] },
+        "2": { "name": "variable.other.property.shaderlab" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "include": "#property-types" },
+        { "include": "#numbers" }
+      ]
+    },
+    "property-attribute": {
+      "match": "\\[\\s*([A-Za-z_]\\w*)([^\\]]*)\\]",
+      "captures": {
+        "1": { "name": "entity.other.attribute-name.shaderlab" },
+        "2": { "patterns": [{ "include": "#strings" }, { "include": "#numbers" }] }
+      }
+    },
+    "property-reference": {
+      "match": "\\[\\s*([A-Za-z_]\\w*)\\s*\\]",
+      "captures": { "1": { "name": "variable.other.property.shaderlab" } }
+    }
+  }
+}
