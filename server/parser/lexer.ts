@@ -8,6 +8,8 @@
  *   トークン列から除外する(括弧の対応が崩れてパース全体が壊れるのを防ぐ)。
  */
 
+import { TextFix } from './ast';
+
 export type TokenKind = 'ident' | 'number' | 'string' | 'punct';
 
 export interface Token {
@@ -46,6 +48,7 @@ export interface DisabledRange extends Span {
 
 export interface LexError extends Span {
   message: string;
+  fixes?: TextFix[];
 }
 
 export interface LexResult {
@@ -142,7 +145,12 @@ class Scanner {
       if (close < 0 || close + 2 > end) {
         if (this.recordTrivia) {
           this.comments.push({ start: i, end });
-          this.errors.push({ start: i, end: i + 2, message: 'ブロックコメントが閉じられていません。' });
+          this.errors.push({
+            start: i,
+            end: i + 2,
+            message: 'ブロックコメントが閉じられていません。',
+            fixes: [{ title: "'*/' を追加してコメントを閉じる", edits: [{ start: end, end, newText: ' */' }], preferred: true }],
+          });
         }
         return end;
       }
@@ -186,7 +194,16 @@ class Scanner {
       }
       j = Math.min(j, end);
       if (!terminated && this.recordTrivia) {
-        this.errors.push({ start: i, end: j, message: '文字列リテラルが閉じられていません。' });
+        // 行末の空白の前に閉じ引用符を補う。
+        let close = j;
+        while (close > i + 1 && /[ \t\r]/.test(text[close - 1])) close--;
+        const quote = String.fromCharCode(code);
+        this.errors.push({
+          start: i,
+          end: j,
+          message: '文字列リテラルが閉じられていません。',
+          fixes: [{ title: `'${quote}' を追加して文字列を閉じる`, edits: [{ start: close, end: close, newText: quote }], preferred: true }],
+        });
       }
       if (this.recordTrivia) this.strings.push({ start: i, end: j });
       // 値は引用符を含めて保持する(文字リテラル '(' を括弧と区別するため)。内容は stringValue() で取得する。

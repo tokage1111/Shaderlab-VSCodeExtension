@@ -11,6 +11,7 @@ import {
   HlslUnit,
   HlslVariable,
   ParameterQualifier,
+  TextFix,
 } from './ast';
 import { Directive, Token, tokenizeRange } from './lexer';
 
@@ -258,6 +259,7 @@ class HlslParser {
       }
       if (++guard > 1_000_000) break;
     }
+    this.linkBufferIncludes();
     return this.unit;
   }
 
@@ -364,7 +366,11 @@ class HlslParser {
       conditional: directive.conditional,
     };
     if (text[k] !== close) {
-      this.issue(j, k, '#include のパスが閉じられていません。', 'error');
+      let at = k;
+      while (at > j + 1 && /\s/.test(text[at - 1])) at--;
+      this.issue(j, k, '#include のパスが閉じられていません。', 'error', [
+        { title: `'${close}' を追加`, edits: [{ start: at, end: at, newText: close }], preferred: true },
+      ]);
     }
     this.unit.includes.push(include);
   }
@@ -1204,6 +1210,13 @@ class HlslParser {
     this.unit.cbuffers.push(cbuffer);
   }
 
+  /** cbuffer の内側にある #include を、その cbuffer に関連付ける。 */
+  private linkBufferIncludes(): void {
+    for (const include of this.unit.includes) {
+      include.cbuffer = this.unit.cbuffers.find((cbuffer) => cbuffer.start < include.start && include.start < cbuffer.end);
+    }
+  }
+
   private parseBufferMembers(cbuffer: HlslCBuffer, endIndex: number): void {
     while (this.i < endIndex) {
       const token = this.tokens[this.i];
@@ -1560,7 +1573,7 @@ class HlslParser {
     return this.tok()?.value === value;
   }
 
-  private issue(start: number, end: number, message: string, severity: 'error' | 'warning'): void {
-    this.unit.issues.push({ start, end, message, severity });
+  private issue(start: number, end: number, message: string, severity: 'error' | 'warning', fixes?: TextFix[]): void {
+    this.unit.issues.push(fixes ? { start, end, message, severity, fixes } : { start, end, message, severity });
   }
 }

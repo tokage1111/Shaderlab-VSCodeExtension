@@ -5,7 +5,7 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
-import { DiagnosticSeverity } from 'vscode-languageserver';
+import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver';
 import { Workspace } from '../server/analysis/workspace';
 import { SourceFile } from '../server/analysis/sourceFile';
 import { lex } from '../server/parser/lexer';
@@ -14,6 +14,8 @@ import { computeDiagnostics } from '../server/features/diagnostics';
 import { provideDefinition } from '../server/features/definition';
 import { provideHover } from '../server/features/hover';
 import { provideReferences } from '../server/features/references';
+import { prepareRename, provideRename } from '../server/features/rename';
+import { provideCodeActions } from '../server/features/quickFixes';
 import { provideCompletion } from '../server/features/completion';
 import { provideSignatureHelp } from '../server/features/signatureHelp';
 import { provideInlayHints } from '../server/features/inlayHints';
@@ -401,6 +403,141 @@ test('シグネチャヘルプ・インレイヒント・アウトライン・�
   assert.strictEqual(symbols[0].name, 'Test/Lit');
   const tokens = await provideSemanticTokens(workspace, file);
   assert.ok(tokens.data.length > 50);
+});
+
+/* ---------------------------------------------------------------------------
+ * cbuffer内の #include
+ * ------------------------------------------------------------------------- */
+
+test('cbuffer内でincludeしたファイルの変数はcbufferのメンバーとして扱う', async () => {
+  const workspace = await openWorkspace();
+  const file = await load(workspace, 'Assets/Shaders/CBufferInclude.shader');
+  const diagnostics = await computeDiagnostics(workspace, file);
+  const problems = diagnostics.filter((d) => d.severity !== DiagnosticSeverity.Hint);
+  assert.deepStrictEqual(problems.map((d) => d.message), []);
+  const hover = await provideHover(workspace, file, offsetOf(file, '_TintColor *', 0, 2));
+  assert.ok(JSON.stringify(hover).includes('UnityPerMaterial'), JSON.stringify(hover));
+});
+
+/* ---------------------------------------------------------------------------
+ * 名前の変更
+ * ------------------------------------------------------------------------- */
+
+test('名前の変更: include先の関数を宣言・呼び出し・#pragma ごと変更する', async () => {
+  const workspace = await openWorkspace();
+  const file = await load(workspace, 'Assets/Shaders/Lit.shader');
+  const edit = await provideRename(workspace, file, offsetOf(file, 'GetTint()', 0, 2), 'GetBaseTint');
+  const files = Object.entries(edit!.changes!).map(([uri, edits]) => `${path.basename(uriToPath(uri)!)}:${edits.length}`);
+  assert.deepStrictEqual(files.sort(), ['Common.hlsl:1', 'Lit.shader:1']);
+  const vertex = await provideRename(workspace, file, offsetOf(file, 'Varyings vert(', 0, 'Varyings '.length), 'Vert');
+  const edits = vertex!.changes![file.uri];
+  assert.strictEqual(edits?.length, 2, '#pragma vertex と宣言');
+});
+
+test('名前の変更: 別パスの同名の構造体・メンバーは変更しない', async () => {
+  const workspace = await openWorkspace();
+  const file = await load(workspace, 'Assets/Shaders/Lit.shader');
+  const lines = async (offset: number): Promise<number[]> => {
+    const edit = await provideRename(workspace, file, offset, 'Renamed');
+    return edit!.changes![file.uri].map((e) => e.range.start.line + 1).sort((a, b) => a - b);
+  };
+  assert.deepStrictEqual(await lines(offsetOf(file, 'struct Varyings', 0, 8)), [41, 48, 50, 59]);
+  assert.deepStrictEqual(await lines(offsetOf(file, 'output.positionCS', 0, 8)), [43, 53]);
+});
+
+test('名前の変更: Propertyと変数を同時に変更し、PackageCacheのシンボルは変更しない', async () => {
+  const workspace = await openWorkspace();
+  const file = await load(workspace, 'Assets/Shaders/Lit.shader');
+  const edit = await provideRename(workspace, file, offsetOf(file, '_Cutoff ("Cutoff"', 0, 2), '_Threshold');
+  const files = Object.entries(edit!.changes!).map(([uri, edits]) => `${path.basename(uriToPath(uri)!)}:${edits.length}`);
+  // Property名 + clip(... - _Cutoff) / Input.hlsl の宣言
+  assert.deepStrictEqual(files.sort(), ['Input.hlsl:1', 'Lit.shader:2']);
+  await assert.rejects(prepareRename(workspace, file, offsetOf(file, 'TransformObjectToHClip', 0, 2)));
+  await assert.rejects(provideRename(workspace, file, offsetOf(file, '_Cutoff ("Cutoff"', 0, 2), 'float4'));
+});
+
+/* ---------------------------------------------------------------------------
+ * クイックフィックス
+ * ------------------------------------------------------------------------- */
+
+/** 診断に添付された修正をテキストに適用する。 */
+function applyFix(file: SourceFile, diagnostic: Diagnostic, index = 0): string {
+  const actions = provideCodeActions({ textDocument: { uri: file.uri }, range: diagnostic.range, context: { diagnostics: [diagnostic] } });
+  const edits = actions[index]?.edit?.changes?.[file.uri];
+  assert.ok(edits, `修正がありません: ${diagnostic.message}`);
+  let text = file.text;
+  const sorted = edits
+    .map((edit) => ({ start: file.lineIndex.offsetAt(edit.range.start), end: file.lineIndex.offsetAt(edit.range.end), newText: edit.newText }))
+    .sort((a, b) => b.start - a.start);
+  for (const edit of sorted) text = text.substring(0, edit.start) + edit.newText + text.substring(edit.end);
+  return text;
+}
+
+test('クイックフィックス: Errors.shader の警告・エラーを修正する', async () => {
+  const workspace = await openWorkspace();
+  const file = await load(workspace, 'Assets/Shaders/Errors.shader');
+  const diagnostics = await computeDiagnostics(workspace, file);
+  const find = (code: string, text: string): Diagnostic => {
+    const found = diagnostics.find(
+      (d) => d.code === code && file.text.substring(file.lineIndex.offsetAt(d.range.start), file.lineIndex.offsetAt(d.range.end)) === text,
+    );
+    assert.ok(found, `${code}:${text}`);
+    return found;
+  };
+  assert.ok(applyFix(file, find('implicit-truncation', 'output.uv')).includes('output.uv = positionOS.xy;'));
+  const declared = applyFix(file, find('property-not-declared', '_Color'));
+  assert.ok(/CBUFFER_START\(UnityPerMaterial\)\s+float4 _Color;\s+CBUFFER_END\s+half4 frag2/.test(declared), declared);
+});
+
+test('クイックフィックス: 打ち間違い・構文の修正', async () => {
+  const workspace = await openWorkspace();
+  const filePath = path.join(shaders, 'QuickFix.shader');
+  const text = [
+    'Shader "Test/QuickFix"',
+    '{',
+    '    Properties',
+    '    {',
+    '        _Color ("Color", Colr) = (1, 1, 1, 1)',
+    '        _Scale ("Scale", Float)',
+    '    }',
+    '    SubShader',
+    '    {',
+    '        Tags { "RenderType" = Opaque }',
+    '        Pass',
+    '        {',
+    '            HLSLPROGRAM',
+    '            #pragma vertex vert',
+    '            #pragma fragment fragg',
+    '            #include "Packages/com.example.cached/ShaderLibrary/Core.hlsl"',
+    '            CBUFFER_START(UnityPerMaterial)',
+    '            float4 _Color;',
+    '            CBUFFER_END',
+    '            float _Scale;',
+    '            float4 vert(float4 positionOS : POSITION) : SV_POSITION { return positionOS * _Scale; }',
+    '            half4 frag() : SV_Target { return _Colr + saturat(1.0); }',
+    '            ENDHLSL',
+    '        }',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+  const uri = pathToUri(filePath);
+  workspace.openDocument(uri, text, 1);
+  const file = workspace.getOpenFile(uri)!;
+  const diagnostics = await computeDiagnostics(workspace, file);
+  const fixed = (needle: string): string => {
+    const diagnostic = diagnostics.find((d) => d.message.includes(needle));
+    assert.ok(diagnostic, `${needle}\n${diagnostics.map((d) => d.message).join('\n')}`);
+    return applyFix(file, diagnostic);
+  };
+  assert.ok(fixed("不明なProperty型 'Colr'").includes('("Color", Color)'));
+  assert.ok(fixed("'_Scale' に既定値").includes('_Scale ("Scale", Float) = 0'));
+  assert.ok(fixed('Tagの値は文字列').includes('"RenderType" = "Opaque"'));
+  assert.ok(fixed("'fragg' が見つかりません").includes('#pragma fragment frag\n'));
+  assert.ok(fixed("'_Colr' が見つかりません").includes('return _Color + saturat'));
+  assert.ok(fixed("'saturat' が見つかりません").includes('saturate(1.0)'));
+  const moved = fixed("SRP Batcher: プロパティ '_Scale'");
+  assert.ok(/float4 _Color;\n\s+float _Scale;\n\s+CBUFFER_END\n\s+float4 vert/.test(moved), moved);
 });
 
 /* ---------------------------------------------------------------------------

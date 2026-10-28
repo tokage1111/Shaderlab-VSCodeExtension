@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import { defaultServerSettings, ServerSettings } from '../../shared/protocol';
+import { HlslCBuffer } from '../parser/ast';
 import { IncludeGraph } from '../project/includeGraph';
 import { isShaderSourcePath, pathKey, pathToUri, uriToPath } from '../project/pathUtils';
 import { UnityProjectResolver } from '../project/unityProject';
@@ -322,7 +323,7 @@ export class Workspace {
     let level: ContextEntry[] = entries.slice();
 
     while (level.length > 0 && visited.size < MAX_CONTEXT_FILES) {
-      const toLoad: string[] = [];
+      const toLoad: Array<{ path: string; container?: HlslCBuffer }> = [];
       for (const entry of level) {
         const unit = entry.file.units[entry.unitIndex];
         if (!unit) continue;
@@ -335,17 +336,19 @@ export class Workspace {
           const includeKey = pathKey(resolution.path);
           if (visited.has(includeKey)) continue;
           visited.add(includeKey);
-          toLoad.push(resolution.path);
+          // cbuffer内でincludeされたファイル(とその先)の変数はcbufferのメンバーになる。
+          toLoad.push({ path: resolution.path, container: entry.container ?? include.cbuffer });
         }
       }
-      const loaded = await Promise.all(toLoad.map((filePath) => this.loadFile(filePath)));
+      const loaded = await Promise.all(toLoad.map((target) => this.loadFile(target.path)));
       level = [];
-      loaded.forEach((file) => {
+      loaded.forEach((file, index) => {
         // 解決できたが読み込めないファイルは無視する。
         if (!file) return;
         dependencies.push(file);
+        const container = toLoad[index].container;
         file.units.forEach((_, unitIndex) => {
-          const entry = { file, unitIndex };
+          const entry: ContextEntry = container ? { file, unitIndex, container } : { file, unitIndex };
           entries.push(entry);
           level.push(entry);
         });

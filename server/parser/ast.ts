@@ -92,6 +92,8 @@ export interface HlslInclude extends Spanned {
   /** #if 等の条件付きコンパイルの内側にある。 */
   conditional: boolean;
   angle: boolean;
+  /** cbuffer の内側に書かれた include。include先の変数はこの cbuffer のメンバーになる。 */
+  cbuffer?: HlslCBuffer;
 }
 
 export interface HlslPragmaArg {
@@ -108,9 +110,22 @@ export interface HlslPragma extends Spanned {
   args: HlslPragmaArg[];
 }
 
+export interface TextFixEdit extends Spanned {
+  newText: string;
+}
+
+/** 診断をテキストの書き換えだけで解決できる場合の修正(クイックフィックス)。 */
+export interface TextFix {
+  title: string;
+  edits: TextFixEdit[];
+  /** 最も確からしい修正(VS Codeの「優先される修正」)。 */
+  preferred?: boolean;
+}
+
 export interface ParseIssue extends Spanned {
   message: string;
   severity: 'error' | 'warning';
+  fixes?: TextFix[];
 }
 
 /** HLSLの翻訳単位の断片(HLSLファイル全体、またはShaderLab内の1ブロック)。 */

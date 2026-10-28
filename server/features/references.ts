@@ -1,7 +1,7 @@
 import { Location } from 'vscode-languageserver';
 import { FUNCTION_PRAGMAS } from '../analysis/builtins';
 import { AnalysisContext } from '../analysis/context';
-import { resolutionKey, resolveAt, resolveToken } from '../analysis/resolver';
+import { Resolution, resolutionKey, resolveAt, resolveToken } from '../analysis/resolver';
 import { SourceFile } from '../analysis/sourceFile';
 import { TypeEvaluator } from '../analysis/typeEvaluator';
 import { Workspace } from '../analysis/workspace';
@@ -31,20 +31,7 @@ export async function provideReferences(
   if (!key) return [];
   const name = resolution.kind === 'property' ? resolution.property.name : result.name;
 
-  const declarations = new Set<string>();
-  switch (resolution.kind) {
-    case 'local':
-      declarations.add(`${resolution.file.key}:${resolution.variable.nameStart}`);
-      break;
-    case 'symbol':
-      for (const symbol of resolution.symbols) declarations.add(`${symbol.file.key}:${symbol.node.nameStart}`);
-      break;
-    case 'field':
-      declarations.add(`${resolution.struct.file.key}:${resolution.field.nameStart}`);
-      break;
-    default:
-      break;
-  }
+  const declarations = new Set(declarationIds(resolution));
 
   const results: Location[] = [];
   const seen = new Set<string>();
@@ -59,21 +46,51 @@ export async function provideReferences(
   // ローカル変数は関数内だけを探す。
   if (resolution.kind === 'local') {
     const fn = resolution.fn;
-    scanUnit({ file: resolution.file, unitIndex: result.unitIndex, context: result.context }, name, key, add, fn.start, fn.end);
+    scanUnit({ file: resolution.file, unitIndex: result.unitIndex, context: result.context }, name, key, add, undefined, fn.start, fn.end);
     return results;
   }
 
-  if (resolution.kind === 'property' || file.shader) {
-    for (const property of file.shader?.properties ?? []) {
-      if (property.name === name && key === `variable:${name}`) add(file, property.nameStart, property.nameEnd);
+  const scopes = await collectScopes(workspace, file, result.context);
+  // ShaderLab の Property 名(include先のHLSLから検索した場合はrootのシェーダー側)も同じ変数の参照とする。
+  let linkedToProperty = resolution.kind === 'property';
+  if (key === `variable:${name}`) {
+    const shaders = new Set<SourceFile>([file, ...scopes.map((scope) => scope.file)]);
+    for (const target of shaders) {
+      for (const property of target.shader?.properties ?? []) {
+        if (property.name !== name) continue;
+        linkedToProperty = true;
+        add(target, property.nameStart, property.nameEnd);
+      }
     }
   }
 
-  for (const scope of await collectScopes(workspace, file, result.context)) {
-    scanUnit(scope, name, key, add);
-    scanDirectives(scope, name, key, add);
+  // 同名でも別の宣言(別パスの同名struct等)を指すものは除く。
+  // Propertyに対応する変数はパスごとに宣言されていても同じものとして扱う。
+  const target = linkedToProperty ? undefined : declarations;
+  for (const scope of scopes) {
+    scanUnit(scope, name, key, add, target);
+    scanDirectives(scope, name, key, add, target);
   }
   return results;
+}
+
+/** 解決結果が指す宣言の識別子(`ファイル:名前の位置`)。 */
+function declarationIds(resolution: Resolution): string[] {
+  switch (resolution.kind) {
+    case 'local':
+      return [`${resolution.file.key}:${resolution.variable.nameStart}`];
+    case 'symbol':
+      return resolution.symbols.map((symbol) => `${symbol.file.key}:${symbol.node.nameStart}`);
+    case 'field':
+      return [`${resolution.struct.file.key}:${resolution.field.nameStart}`];
+    default:
+      return [];
+  }
+}
+
+function sharesDeclaration(resolution: Resolution, declarations: Set<string> | undefined): boolean {
+  if (!declarations || declarations.size === 0) return true;
+  return declarationIds(resolution).some((id) => declarations.has(id));
 }
 
 async function collectScopes(workspace: Workspace, file: SourceFile, context: AnalysisContext): Promise<Scope[]> {
@@ -104,6 +121,7 @@ function scanUnit(
   name: string,
   key: string,
   add: (file: SourceFile, start: number, end: number) => void,
+  declarations: Set<string> | undefined,
   from = -Infinity,
   to = Infinity,
 ): void {
@@ -119,17 +137,25 @@ function scanUnit(
     if (token.kind !== 'ident' || token.value !== name || token.start < from || token.start > to) continue;
     evaluator ??= new TypeEvaluator(context, file, unitIndex);
     const resolution = resolveToken(context, file, unitIndex, index, evaluator);
-    if (resolutionKey(resolution) === key) add(file, token.start, token.end);
+    if (resolutionKey(resolution) === key && sharesDeclaration(resolution, declarations)) add(file, token.start, token.end);
   }
 }
 
 /** #define の本体や #pragma vertex 等に書かれた参照。 */
-function scanDirectives(scope: Scope, name: string, key: string, add: (file: SourceFile, start: number, end: number) => void): void {
-  const { file, unitIndex } = scope;
+function scanDirectives(
+  scope: Scope,
+  name: string,
+  key: string,
+  add: (file: SourceFile, start: number, end: number) => void,
+  declarations: Set<string> | undefined,
+): void {
+  const { file, unitIndex, context } = scope;
   const unit = file.units[unitIndex];
   if (!unit) return;
   const kind = key.substring(0, key.indexOf(':'));
   if (kind !== 'function' && kind !== 'macro' && kind !== 'variable') return;
+  // ディレクティブ内の名前は個別に解決できないため、この単位から対象の宣言が見えるかで判定する。
+  if (!sharesDeclaration({ kind: 'symbol', symbols: context.lookup(name) }, declarations)) return;
   for (const directive of file.lexResult.directives) {
     if (directive.start < unit.start || directive.start > unit.end || directive.inactive) continue;
     if (!file.text.substring(directive.bodyStart, directive.end).includes(name)) continue;

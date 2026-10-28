@@ -1,4 +1,5 @@
 import {
+  CodeActionKind,
   CompletionList,
   createConnection,
   DidChangeWatchedFilesNotification,
@@ -6,6 +7,7 @@ import {
   InitializeParams,
   InitializeResult,
   ProposedFeatures,
+  ResponseError,
   TextDocuments,
   TextDocumentSyncKind,
 } from 'vscode-languageserver/node';
@@ -28,6 +30,8 @@ import { provideDocumentSymbols } from './features/documentSymbols';
 import { provideHover } from './features/hover';
 import { includeTreeChildren, includeTreeRoots } from './features/includeTree';
 import { provideInlayHints } from './features/inlayHints';
+import { provideCodeActions } from './features/quickFixes';
+import { prepareRename, provideRename } from './features/rename';
 import { provideReferences } from './features/references';
 import { provideSemanticTokens, semanticTokensLegend } from './features/semanticTokens';
 import { provideSignatureHelp } from './features/signatureHelp';
@@ -76,6 +80,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       hoverProvider: true,
       definitionProvider: true,
       referencesProvider: true,
+      renameProvider: { prepareProvider: true },
+      codeActionProvider: { codeActionKinds: [CodeActionKind.QuickFix] },
       documentSymbolProvider: true,
       signatureHelpProvider: { triggerCharacters: ['(', ','], retriggerCharacters: [','] },
       semanticTokensProvider: { legend: semanticTokensLegend, full: true },
@@ -223,7 +229,13 @@ async function publishDiagnostics(uri: string): Promise<void> {
  * 言語機能
  * ------------------------------------------------------------------------- */
 
-async function withFile<T>(uri: string, fallback: T, action: (file: SourceFile) => Promise<T> | T): Promise<T> {
+/** rethrowUserErrors: ResponseError(名前を変更できない理由など)はクライアントへそのまま返す。 */
+async function withFile<T>(
+  uri: string,
+  fallback: T,
+  action: (file: SourceFile) => Promise<T> | T,
+  rethrowUserErrors = false,
+): Promise<T> {
   try {
     let file = workspace.getOpenFile(uri);
     if (!file) {
@@ -233,6 +245,7 @@ async function withFile<T>(uri: string, fallback: T, action: (file: SourceFile) 
     if (!file) return fallback;
     return await action(file);
   } catch (error) {
+    if (rethrowUserErrors && error instanceof ResponseError) throw error;
     logError(`リクエストの処理に失敗しました: ${uri}`, error);
     return fallback;
   }
@@ -287,6 +300,21 @@ connection.onReferences((params) =>
     provideReferences(workspace, file, file.lineIndex.offsetAt(params.position), params.context.includeDeclaration),
   ),
 );
+
+connection.onPrepareRename((params) =>
+  withFile(params.textDocument.uri, null, (file) => prepareRename(workspace, file, file.lineIndex.offsetAt(params.position)), true),
+);
+
+connection.onRenameRequest((params) =>
+  withFile(
+    params.textDocument.uri,
+    null,
+    (file) => provideRename(workspace, file, file.lineIndex.offsetAt(params.position), params.newName),
+    true,
+  ),
+);
+
+connection.onCodeAction((params) => provideCodeActions(params));
 
 connection.onDocumentSymbol((params) => withFile(params.textDocument.uri, [], (file) => provideDocumentSymbols(file)));
 

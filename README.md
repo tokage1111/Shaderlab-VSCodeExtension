@@ -12,6 +12,8 @@ Unity URP 向けの ShaderLab / HLSL 用 VS Code 拡張機能です。
 | Hover | 宣言(関数のオーバーロード、構造体の中身、マクロ本体)と定義場所 |
 | 定義へ移動 (F12) | ローカル変数(ブロックのシャドーイング対応)、`a.b.c` / `GetFoo().x` などのメンバー、include先、`#include` のファイル、Property → CBUFFER 内の宣言 |
 | 参照検索 (Shift+F12) | root から見た翻訳単位全体を検索。構造体メンバーは型が一致するものだけを返す |
+| 名前の変更 (F2) | 変数・関数・構造体・メンバー・マクロ・Property を、include 先や `#pragma vertex` などを含めて一括変更。別パスの同名の構造体は変更しない。`Library/PackageCache` 内で宣言・参照されているものは変更不可 |
+| クイックフィックス (Ctrl+.) | 下表の診断のうち、書き換えで解決できるものを修正 |
 | シグネチャヘルプ | 関数・マクロ・組み込み関数・メソッドの引数 |
 | インレイヒント | `out` / `inout` 引数に渡している箇所に `out:` / `inout:` を表示 |
 | アウトライン | Shader > SubShader > Pass > HLSL 宣言 の階層 |
@@ -33,6 +35,14 @@ Unity URP 向けの ShaderLab / HLSL 用 VS Code 拡張機能です。
 | 未定義の識別子・関数・型 | 警告(`#if` 内は情報) |
 | Properties にあるが HLSL 側で宣言されていない変数の使用 | 警告 |
 | SRP Batcher 非互換(UnityPerMaterial の外で宣言されたプロパティ、パス間で異なる UnityPerMaterial) | 情報 / 警告 |
+
+クイックフィックスで修正できるもの:
+
+- 暗黙の切り捨て → スウィズルで成分を明示(`v.xyz` → `v.xy`、`v` → `v.xy`)
+- 未定義の識別子・関数・型、存在しないメンバー、`#pragma vertex` 等の関数名 → 名前の近い候補に変更
+- Properties にあるが宣言されていない変数 → CBUFFER(UnityPerMaterial) に宣言を追加(テクスチャは `TEXTURE2D` / `SAMPLER` を追加)
+- UnityPerMaterial の外で宣言されたプロパティ → CBUFFER 内へ移動
+- 不明な Property 型、Property の既定値の欠落、文字列でない Tag の値、Property 属性の `]` の欠落、閉じていない文字列・コメント・`#include` のパス
 
 誤検出を避けるため、次の場合は未定義シンボルの検査を行いません。
 

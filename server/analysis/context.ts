@@ -1,10 +1,12 @@
-import { HlslInclude } from '../parser/ast';
+import { HlslCBuffer, HlslInclude } from '../parser/ast';
 import { isIdentifierText } from '../parser/lexer';
 import { GlobalSymbol, GlobalSymbolKind, SourceFile, SymbolOfKind } from './sourceFile';
 
 export interface ContextEntry {
   file: SourceFile;
   unitIndex: number;
+  /** cbuffer内でincludeされた単位。グローバル変数はこのcbufferのメンバーとして扱う。 */
+  container?: HlslCBuffer;
 }
 
 export interface UnresolvedInclude {
@@ -23,6 +25,7 @@ export class AnalysisContext {
   /** すべてのincludeを解決でき、未定義判定を信頼できる。 */
   public readonly complete: boolean;
   private readonly aliasCache = new Map<string, string>();
+  private readonly bufferMembers = new Map<string, SymbolOfKind<'variable'>[]>();
 
   public constructor(
     public readonly key: string,
@@ -34,10 +37,17 @@ export class AnalysisContext {
   ) {
     for (const entry of entries) {
       this.fileKeys.add(entry.file.key);
-      for (const symbol of entry.file.symbolsOf(entry.unitIndex)) {
+      for (const fileSymbol of entry.file.symbolsOf(entry.unitIndex)) {
+        const symbol: GlobalSymbol =
+          entry.container && fileSymbol.kind === 'variable' && !fileSymbol.container ? { ...fileSymbol, container: entry.container } : fileSymbol;
         const list = this.byName.get(symbol.name);
         if (list) list.push(symbol);
         else this.byName.set(symbol.name, [symbol]);
+        if (symbol.kind === 'variable' && symbol.container) {
+          const members = this.bufferMembers.get(symbol.container.name);
+          if (members) members.push(symbol);
+          else this.bufferMembers.set(symbol.container.name, [symbol]);
+        }
       }
     }
     // #if 内の見つからないincludeは無効な分岐である可能性が高いので完全性の判定から除く。
@@ -62,6 +72,14 @@ export class AnalysisContext {
 
   public *allSymbols(): IterableIterator<GlobalSymbol> {
     for (const list of this.byName.values()) yield* list;
+  }
+
+  /**
+   * cbufferのメンバー変数。cbuffer内でincludeされたファイルで宣言された変数も含む。
+   * 同名のcbufferが複数ある場合(パスごとの定義等)はまとめて返す。
+   */
+  public cbufferMembers(name: string): SymbolOfKind<'variable'>[] {
+    return this.bufferMembers.get(name) ?? [];
   }
 
   public names(): IterableIterator<string> {

@@ -1,12 +1,23 @@
 import { Diagnostic, DiagnosticSeverity, DiagnosticTag } from 'vscode-languageserver';
-import { HlslUnit, ParseIssue } from '../parser/ast';
+import { HlslUnit, ParseIssue, TextFix } from '../parser/ast';
 import { lowerBoundToken, spansContain, Token } from '../parser/lexer';
-import { FUNCTION_PRAGMAS, HLSL_KEYWORDS, isCompilerPredefinedMacro, parseNumericType } from '../analysis/builtins';
+import {
+  COMPLETION_TYPES,
+  FUNCTION_PRAGMAS,
+  getObjectMethods,
+  HLSL_KEYWORDS,
+  INTRINSICS,
+  isCompilerPredefinedMacro,
+  parseNumericType,
+} from '../analysis/builtins';
 import { AnalysisContext } from '../analysis/context';
 import { resolveToken } from '../analysis/resolver';
+import { visibleLocals } from '../analysis/scope';
 import { SourceFile } from '../analysis/sourceFile';
 import { TypeEvaluator, TypeRef } from '../analysis/typeEvaluator';
 import { Workspace } from '../analysis/workspace';
+import { similarNames } from '../parser/similarity';
+import { declarePropertyFix, moveIntoBufferFix, renameFixes, swizzleFix, toDiagnosticData } from './quickFixes';
 
 const SOURCE = 'URP ShaderLab';
 const MAX_DIAGNOSTICS = 500;
@@ -32,16 +43,25 @@ export async function computeDiagnostics(workspace: Workspace, file: SourceFile)
   const diagnostics: Diagnostic[] = inactiveCodeDiagnostics(file);
   if (!settings.enable) return diagnostics;
   const seen = new Set<string>();
-  const add = (start: number, end: number, message: string, severity: DiagnosticSeverity, code: DiagnosticCode): void => {
+  const add: AddDiagnostic = (start, end, message, severity, code, fixes) => {
     const key = `${start}:${end}:${message}`;
     if (seen.has(key) || diagnostics.length >= MAX_DIAGNOSTICS) return;
     seen.add(key);
-    diagnostics.push({ range: file.lineIndex.range(start, Math.max(end, start + 1)), message, severity, source: SOURCE, code });
+    const diagnostic: Diagnostic = { range: file.lineIndex.range(start, Math.max(end, start + 1)), message, severity, source: SOURCE, code };
+    if (fixes && fixes.length > 0) diagnostic.data = toDiagnosticData(file, fixes);
+    diagnostics.push(diagnostic);
   };
   const addIssue = (issue: ParseIssue): void =>
-    add(issue.start, issue.end, issue.message, issue.severity === 'error' ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning, 'syntax');
+    add(
+      issue.start,
+      issue.end,
+      issue.message,
+      issue.severity === 'error' ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning,
+      'syntax',
+      issue.fixes,
+    );
 
-  for (const error of file.lexResult.errors) add(error.start, error.end, error.message, DiagnosticSeverity.Error, 'syntax');
+  for (const error of file.lexResult.errors) add(error.start, error.end, error.message, DiagnosticSeverity.Error, 'syntax', error.fixes);
   file.shader?.issues.forEach(addIssue);
 
   for (let unitIndex = 0; unitIndex < file.units.length; unitIndex++) {
@@ -93,7 +113,14 @@ function inactiveCodeDiagnostics(file: SourceFile): Diagnostic[] {
   }));
 }
 
-type AddDiagnostic = (start: number, end: number, message: string, severity: DiagnosticSeverity, code: DiagnosticCode) => void;
+type AddDiagnostic = (
+  start: number,
+  end: number,
+  message: string,
+  severity: DiagnosticSeverity,
+  code: DiagnosticCode,
+  fixes?: TextFix[],
+) => void;
 
 function checkIncludes(workspace: Workspace, file: SourceFile, unit: HlslUnit, add: AddDiagnostic): void {
   for (const include of unit.includes) {
@@ -134,12 +161,16 @@ function checkPragmas(context: AnalysisContext, unit: HlslUnit, add: AddDiagnost
     if (context.lookupKind(target.value, 'function').length > 0) continue;
     // include先が解析できていない場合は誤検出を避ける。
     if (!context.complete || pragma.name === 'surface') continue;
+    const functions = Array.from(context.allSymbols())
+      .filter((symbol) => symbol.kind === 'function')
+      .map((symbol) => symbol.name);
     add(
       target.start,
       target.end,
       `#pragma ${pragma.name} で指定された関数 '${target.value}' が見つかりません。`,
       DiagnosticSeverity.Error,
       'pragma-function',
+      renameFixes(target.start, target.end, similarNames(target.value, functions)),
     );
   }
 }
@@ -206,7 +237,8 @@ class UnitChecker {
       case 'unresolvedMember':
         // マクロ引数はマクロ側で使われない場合があるため判定しない。
         if (resolution.message && !this.isInsideMacroArguments(index)) {
-          this.add(token.start, token.end, resolution.message, DiagnosticSeverity.Error, 'unknown-member');
+          const fixes = renameFixes(token.start, token.end, similarNames(token.value, this.memberCandidates(index)));
+          this.add(token.start, token.end, resolution.message, DiagnosticSeverity.Error, 'unknown-member', fixes);
         }
         return;
       case 'unresolved':
@@ -262,11 +294,27 @@ class UnitChecker {
         const close = this.evaluator.matchForward(index + 1);
         if (close > 0) this.macroArgumentRanges.push([index + 1, close]);
       }
-      this.add(token.start, token.end, `関数またはマクロ '${name}' が見つかりません。`, this.undefinedSeverity(token), 'undefined-function');
+      const callables = [...this.symbolNames(['function', 'macro']), ...Object.keys(INTRINSICS)];
+      this.add(
+        token.start,
+        token.end,
+        `関数またはマクロ '${name}' が見つかりません。`,
+        this.undefinedSeverity(token),
+        'undefined-function',
+        renameFixes(token.start, token.end, similarNames(name, callables)),
+      );
       return;
     }
     if (this.unit.declarationOffsets.has(token.start)) {
-      this.add(token.start, token.end, `型 '${name}' が見つかりません。`, DiagnosticSeverity.Warning, 'undefined-type');
+      const types = [...this.symbolNames(['struct', 'typedef', 'macro']), ...COMPLETION_TYPES];
+      this.add(
+        token.start,
+        token.end,
+        `型 '${name}' が見つかりません。`,
+        DiagnosticSeverity.Warning,
+        'undefined-type',
+        renameFixes(token.start, token.end, similarNames(name, types)),
+      );
       return;
     }
     const property = this.file.shader?.properties.find((candidate) => candidate.name === name);
@@ -277,10 +325,47 @@ class UnitChecker {
         `'${name}' はPropertiesで宣言されていますが、HLSL側で変数として宣言されていません。CBUFFER(UnityPerMaterial)等に宣言を追加してください。`,
         DiagnosticSeverity.Warning,
         'property-not-declared',
+        declarePropertyFix(this.file, this.unitIndex, this.context, property, token.start),
       );
       return;
     }
-    this.add(token.start, token.end, `識別子 '${name}' が見つかりません。`, this.undefinedSeverity(token), 'undefined-identifier');
+    const variables = [
+      ...this.symbolNames(['variable', 'macro']),
+      ...visibleLocals(this.file, this.unitIndex, token.start).map((local) => local.variable.name),
+    ];
+    this.add(
+      token.start,
+      token.end,
+      `識別子 '${name}' が見つかりません。`,
+      this.undefinedSeverity(token),
+      'undefined-identifier',
+      renameFixes(token.start, token.end, similarNames(name, variables)),
+    );
+  }
+
+  /** 打ち間違いの修正候補に使う、コンテキスト内の指定した種類のシンボル名。 */
+  private symbolNames(kinds: string[]): string[] {
+    const names: string[] = [];
+    for (const symbol of this.context.allSymbols()) {
+      if (kinds.includes(symbol.kind)) names.push(symbol.name);
+    }
+    return names;
+  }
+
+  /** `obj.member` の obj の型が持つメンバー名(存在しないメンバーの修正候補)。 */
+  private memberCandidates(index: number): string[] {
+    if (this.tokens[index - 1]?.value !== '.') return [];
+    const objectStart = this.evaluator.chainStart(index - 2);
+    if (objectStart < 0) return [];
+    const objectType = this.evaluator.evaluateChain(objectStart, index - 2);
+    if (!objectType || objectType.arrayDims > 0) return [];
+    const names: string[] = [];
+    for (const struct of this.evaluator.findStructs(objectType.name)) {
+      names.push(...struct.node.fields.map((field) => field.name), ...struct.node.methods.map((method) => method.name));
+    }
+    const methods = getObjectMethods(this.evaluator.resolve(objectType).base);
+    if (methods) names.push(...Object.keys(methods));
+    return names;
   }
 
   /** #if の内側は定義も条件付きの場合が多いため、重要度を下げる。 */
@@ -324,7 +409,7 @@ class UnitChecker {
       const to = lowerBoundToken(this.tokens, initEnd);
       if (this.tokens[from]?.value === '{') return;
       const valueType = this.evaluator.evaluateExpression(from, to);
-      if (valueType) this.compareVectorSizes({ name: type, arrayDims }, valueType, nameStart, nameEnd);
+      if (valueType) this.compareVectorSizes({ name: type, arrayDims }, valueType, nameStart, nameEnd, from, to);
     };
     for (const fn of this.unit.functions) {
       for (const local of fn.locals) check(local.type, local.arrayDims, local.initStart, local.initEnd, local.nameStart, local.nameEnd);
@@ -356,10 +441,11 @@ class UnitChecker {
     if (!target) return;
     const valueType = this.evaluator.evaluateExpression(index + 1, end);
     if (!valueType) return;
-    this.compareVectorSizes(target, valueType, this.tokens[lhsStart].start, this.tokens[index - 1].end);
+    this.compareVectorSizes(target, valueType, this.tokens[lhsStart].start, this.tokens[index - 1].end, index + 1, end);
   }
 
-  private compareVectorSizes(target: TypeRef, value: TypeRef, start: number, end: number): void {
+  /** valueFrom / valueTo は右辺のトークン範囲 [valueFrom, valueTo)。 */
+  private compareVectorSizes(target: TypeRef, value: TypeRef, start: number, end: number, valueFrom: number, valueTo: number): void {
     if (target.arrayDims > 0 || value.arrayDims > 0 || target.ambiguous || value.ambiguous) return;
     const targetType = this.evaluator.resolve(target);
     const valueType = this.evaluator.resolve(value);
@@ -382,6 +468,7 @@ class UnitChecker {
         `'${valueType.text}' から '${targetType.text}' への暗黙の切り捨てが発生します。必要な成分をスウィズルで明示してください。`,
         DiagnosticSeverity.Warning,
         'implicit-truncation',
+        swizzleFix(this.file, this.evaluator, valueFrom, valueTo, t.rows),
       );
     }
   }
@@ -426,6 +513,7 @@ async function checkSrpBatcher(workspace: Workspace, file: SourceFile, add: AddD
 
   const layouts: Array<{ signature: string; start: number; end: number }> = [];
   const notInBuffer = new Map<string, number>();
+  const moveFixes = new Map<string, TextFix[]>();
   let anyBuffer = false;
   for (const { index } of programs) {
     const context = await workspace.contextForUnit(file, index);
@@ -433,17 +521,26 @@ async function checkSrpBatcher(workspace: Workspace, file: SourceFile, add: AddD
     if (buffers.length === 0) continue;
     anyBuffer = true;
     const buffer = buffers[0];
-    const fields = new Set(buffers.flatMap((candidate) => candidate.node.fields.map((field) => field.name)));
+    // cbuffer内でincludeしたファイルの変数もメンバーに含める。
+    const members = context.cbufferMembers('UnityPerMaterial');
+    const fields = new Set(members.map((member) => member.name));
     layouts.push({
-      signature: buffer.node.fields.map((field) => `${field.type} ${field.name}`).join(';'),
+      signature: members.map((member) => `${member.node.type} ${member.name}`).join(';'),
       start: buffer.file === file ? buffer.node.nameStart : file.blockOf(index)!.start,
       end: buffer.file === file ? buffer.node.nameEnd : file.blockOf(index)!.start + file.blockOf(index)!.kind.length,
     });
     for (const property of shader.properties) {
       if (TEXTURE_PROPERTY_TYPES.has(property.typeKind) || fields.has(property.name)) continue;
       // HLSL側で(cbuffer外に)宣言されているプロパティだけが対象。
-      const declared = context.lookupKind(property.name, 'variable').some((symbol) => !symbol.container || symbol.container.name !== 'UnityPerMaterial');
-      if (declared) notInBuffer.set(property.name, (notInBuffer.get(property.name) ?? 0) + 1);
+      const outside = context
+        .lookupKind(property.name, 'variable')
+        .filter((symbol) => !symbol.container || symbol.container.name !== 'UnityPerMaterial');
+      if (outside.length === 0) continue;
+      notInBuffer.set(property.name, (notInBuffer.get(property.name) ?? 0) + 1);
+      if (!moveFixes.has(property.name)) {
+        const fixes = moveIntoBufferFix(file, buffers, outside);
+        if (fixes) moveFixes.set(property.name, fixes);
+      }
     }
   }
   if (!anyBuffer) return;
@@ -456,6 +553,7 @@ async function checkSrpBatcher(workspace: Workspace, file: SourceFile, add: AddD
       `SRP Batcher: プロパティ '${property.name}' が CBUFFER_START(UnityPerMaterial) の外で宣言されているため、SRP Batcherと互換性がありません。`,
       DiagnosticSeverity.Information,
       'srp-batcher',
+      moveFixes.get(property.name),
     );
   }
   const first = layouts[0];

@@ -1,5 +1,17 @@
 # Change Log
 
+## [Unreleased]
+
+### 追加
+
+- 名前の変更 (F2): include 先・ShaderLab の Property・`#pragma vertex` 等を含めて一括変更
+- クイックフィックス: 暗黙の切り捨てのスウィズル、名前の打ち間違い、Property の宣言の追加・CBUFFER への移動、ShaderLab / 字句の構文エラーなど
+
+### 修正
+
+- `CBUFFER_START(UnityPerMaterial)` の内側で `#include` したファイルの変数が CBUFFER のメンバーとして扱われず、SRP Batcher の誤った警告が出ていた
+- 参照検索で、別パスの同名の構造体・メンバーまで返していた
+
 ## [0.2.0]
 
 解析エンジンを全面的に作り直しました。

@@ -1,5 +1,6 @@
 import {
   ParseIssue,
+  TextFix,
   ShaderBlockKind,
   ShaderDocument,
   ShaderHlslBlock,
@@ -11,6 +12,7 @@ import {
 } from './ast';
 import { parseHlslUnit } from './hlslParser';
 import { LexResult, stringValue, Token } from './lexer';
+import { closestName } from './similarity';
 
 const BLOCK_END: Record<ShaderBlockKind, string> = {
   HLSLPROGRAM: 'ENDHLSL',
@@ -35,6 +37,27 @@ export const PROPERTY_TYPES: Record<string, string> = {
   any: 'Any',
   rect: 'Rect',
 };
+
+/** Property型ごとの既定値(既定値の書き忘れを補う修正で使う)。 */
+function defaultPropertyValue(typeKind: string): string {
+  switch (typeKind) {
+    case 'Color':
+      return '(1, 1, 1, 1)';
+    case 'Vector':
+      return '(0, 0, 0, 0)';
+    case '2D':
+    case '2DArray':
+    case 'Rect':
+      return '"white" {}';
+    case '3D':
+    case 'Cube':
+    case 'CubeArray':
+    case 'Any':
+      return '"" {}';
+    default:
+      return '0';
+  }
+}
 
 export function isHlslBlockKind(value: string): value is ShaderBlockKind {
   return Object.prototype.hasOwnProperty.call(BLOCK_END, value);
@@ -329,7 +352,9 @@ class ShaderLabParser {
         });
         t = v;
       } else if (value && v < close) {
-        this.issue(value.start, value.end, 'Tagの値は文字列で指定してください。', 'error');
+        this.issue(value.start, value.end, 'Tagの値は文字列で指定してください。', 'error', [
+          { title: `"${value.value}" に変更`, edits: [{ start: value.start, end: value.end, newText: `"${value.value}"` }], preferred: true },
+        ]);
       }
     }
     this.i = close + 1;
@@ -366,7 +391,7 @@ class ShaderLabParser {
     while (this.isValue('[') && this.i < close) {
       const attributeClose = this.findInLine(this.i, ']', close);
       if (attributeClose < 0) {
-        this.issue(this.tokens[this.i].start, this.tokens[this.i].end, "Property属性の ']' がありません。", 'error');
+        this.issue(this.tokens[this.i].start, this.tokens[this.i].end, "Property属性の ']' がありません。", 'error', this.attributeCloseFix(close));
         return undefined;
       }
       attributes.push(this.text.substring(this.tokens[this.i].end, this.tokens[attributeClose].start).trim());
@@ -396,7 +421,17 @@ class ShaderLabParser {
     const typeKey = type.replace(/\s*\(.*$/s, '').toLowerCase();
     const typeKind = PROPERTY_TYPES[typeKey] ?? '';
     if (!typeKind) {
-      this.issue(typeStart, Math.max(typeStart + 1, typeEnd), `不明なProperty型 '${type}' です。`, 'warning');
+      const suggestion = closestName(typeKey, Object.keys(PROPERTY_TYPES));
+      const fixes: TextFix[] | undefined = suggestion
+        ? [
+            {
+              title: `'${PROPERTY_TYPES[suggestion]}' に変更`,
+              edits: [{ start: typeStart, end: typeStart + type.replace(/\s*\(.*$/s, '').length, newText: PROPERTY_TYPES[suggestion] }],
+              preferred: true,
+            },
+          ]
+        : undefined;
+      this.issue(typeStart, Math.max(typeStart + 1, typeEnd), `不明なProperty型 '${type}' です。`, 'warning', fixes);
     }
     this.i = parenClose + 1;
     let defaultValue = '';
@@ -426,7 +461,11 @@ class ShaderLabParser {
         defaultValue = this.text.substring(valueStart.start, end).trim();
       }
     } else {
-      this.issue(nameToken.start, nameToken.end, `Property '${nameToken.value}' に既定値 (= ...) がありません。`, 'error');
+      const value = defaultPropertyValue(typeKind);
+      const at = this.tokens[parenClose].end;
+      this.issue(nameToken.start, nameToken.end, `Property '${nameToken.value}' に既定値 (= ...) がありません。`, 'error', [
+        { title: `既定値 '= ${value}' を追加`, edits: [{ start: at, end: at, newText: ` = ${value}` }], preferred: true },
+      ]);
     }
     return {
       name: nameToken.value,
@@ -442,6 +481,20 @@ class ShaderLabParser {
       start: first.start,
       end,
     };
+  }
+
+  /** `[Attr` / `[Attr(args)` の直後に ']' を補う修正。 */
+  private attributeCloseFix(limit: number): TextFix[] | undefined {
+    const name = this.tokens[this.i + 1];
+    if (!name || name.kind !== 'ident' || this.i + 1 >= limit) return undefined;
+    let last = this.i + 1;
+    if (this.tokens[last + 1]?.value === '(') {
+      const parenClose = this.findMatchingParen(last + 1, limit);
+      if (parenClose < 0) return undefined;
+      last = parenClose;
+    }
+    const at = this.tokens[last].end;
+    return [{ title: "']' を追加", edits: [{ start: at, end: at, newText: ']' }], preferred: true }];
   }
 
   private findMatchingParen(open: number, limit: number): number {
@@ -494,7 +547,7 @@ class ShaderLabParser {
     return this.tokens[this.i]?.value === value;
   }
 
-  private issue(start: number, end: number, message: string, severity: ParseIssue['severity']): void {
-    this.document.issues.push({ start, end, message, severity });
+  private issue(start: number, end: number, message: string, severity: ParseIssue['severity'], fixes?: TextFix[]): void {
+    this.document.issues.push(fixes ? { start, end, message, severity, fixes } : { start, end, message, severity });
   }
 }
